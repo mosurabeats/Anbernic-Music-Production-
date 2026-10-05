@@ -1,0 +1,5 @@
+/ardkore
+/tests/test_engine
+*.prj
+*.prj.tmp
+*.o
