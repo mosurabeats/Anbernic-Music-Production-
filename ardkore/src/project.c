@@ -7,6 +7,7 @@
 #include "demo.h"
 #include "machine.h"
 #include "params.h"
+#include "ps1.h"
 
 #define PROJECT_MAGIC "ARDKORE 1"
 
@@ -16,7 +17,8 @@ int project_save(const Engine *e, const char *path)
     snprintf(tmp, sizeof tmp, "%s.tmp", path);
     FILE *f = fopen(tmp, "w");
     if (!f) return -1;
-    fprintf(f, "%s\nbpm %d\nswing %d\nmaster %d\n", PROJECT_MAGIC, e->bpm, e->swing, e->master);
+    fprintf(f, "%s\nbpm %d\nswing %d\nmaster %d\nreverb %d\nrvblevel %d\n", PROJECT_MAGIC, e->bpm, e->swing,
+            e->master, e->rvb_preset, e->rvb_level);
     for (int t = 0; t < NUM_TRACKS; t++) {
         const Track *tr = &e->tr[t];
         fprintf(f, "track %d\n", t);
@@ -55,6 +57,8 @@ int project_load(Engine *e, const char *path, char *err, int errlen)
 
     engine_play(e, 0);
     for (int t = 0; t < NUM_TRACKS; t++) engine_track_clear(e, t);
+    e->rvb_preset = PS1_RVB_OFF; /* projects saved before the reverb existed */
+    e->rvb_level = 60;
 
     char srcs[NUM_TRACKS][SRC_ID_LEN] = {{0}};
     int cur = -1;
@@ -65,6 +69,8 @@ int project_load(Engine *e, const char *path, char *err, int errlen)
         if (sscanf(line, "bpm %d", &a) == 1) e->bpm = clampi(a, 40, 300);
         else if (sscanf(line, "swing %d", &a) == 1) e->swing = clampi(a, 50, 75);
         else if (sscanf(line, "master %d", &a) == 1) e->master = clampi(a, 0, 100);
+        else if (sscanf(line, "reverb %d", &a) == 1) e->rvb_preset = clampi(a, 0, PS1_RVB_COUNT - 1);
+        else if (sscanf(line, "rvblevel %d", &a) == 1) e->rvb_level = clampi(a, 0, 100);
         else if (sscanf(line, "track %d", &a) == 1) cur = (a >= 0 && a < NUM_TRACKS) ? a : -1;
         else if (cur < 0) continue;
         else if (!strncmp(line, "src ", 4)) snprintf(srcs[cur], SRC_ID_LEN, "%s", line + 4);
@@ -86,10 +92,10 @@ int project_load(Engine *e, const char *path, char *err, int errlen)
     for (int t = 0; t < NUM_TRACKS; t++) {
         if (!srcs[t][0]) continue;
         float *mono;
-        int len, rate;
+        int len, rate, loop;
         char name[SAMPLE_NAME_LEN], why[64];
-        if (demo_load_source(srcs[t], &mono, &len, &rate, name, sizeof name, why, sizeof why) == 0) {
-            engine_track_load(e, t, mono, len, rate, name, srcs[t]);
+        if (demo_load_source(srcs[t], &mono, &len, &rate, &loop, name, sizeof name, why, sizeof why) == 0) {
+            engine_track_load(e, t, mono, len, rate, loop, name, srcs[t]);
         } else {
             /* Keep the reference so saving again doesn't lose it. */
             snprintf(e->tr[t].src_id, SRC_ID_LEN, "%s", srcs[t]);
@@ -100,13 +106,21 @@ int project_load(Engine *e, const char *path, char *err, int errlen)
     return missing;
 }
 
-static void load_demo(Engine *e, int t, const char *id)
+static void load_builtin(Engine *e, int t, const char *id)
 {
     float *mono;
-    int len, rate;
+    int len, rate, loop;
     char name[SAMPLE_NAME_LEN], why[64];
-    if (demo_load_source(id, &mono, &len, &rate, name, sizeof name, why, sizeof why) == 0)
-        engine_track_load(e, t, mono, len, rate, name, id);
+    if (demo_load_source(id, &mono, &len, &rate, &loop, name, sizeof name, why, sizeof why) == 0)
+        engine_track_load(e, t, mono, len, rate, loop, name, id);
+}
+
+static void set_steps(Track *t, const int *steps, const int *vals, int n)
+{
+    for (int i = 0; i < n; i++) {
+        t->steps[steps[i]].on = 1;
+        t->steps[steps[i]].val = (uint8_t)vals[i];
+    }
 }
 
 void project_default(Engine *e)
@@ -115,26 +129,48 @@ void project_default(Engine *e)
     for (int t = 0; t < NUM_TRACKS; t++) engine_track_clear(e, t);
     e->bpm = DEMO_BREAK_BPM;
     e->swing = 50;
+    e->rvb_preset = PS1_RVB_HALL;
+    e->rvb_level = 55;
 
-    /* Track 1: the break, sliced 16 ways and re-arranged a little. */
-    load_demo(e, 0, "demo:break");
+    /* Track 1: the break through the Amiga, sliced 16 ways and re-arranged a little. */
+    load_builtin(e, 0, "demo:break");
     static const int order[NUM_STEPS] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 4, 13, 12, 12};
     for (int s = 0; s < NUM_STEPS; s++) {
         e->tr[0].steps[s].on = 1;
         e->tr[0].steps[s].val = (uint8_t)order[s];
     }
     e->tr[0].steps[15].roll = 3; /* x4 roll into the loop point */
+    e->tr[0].p.rvb = 6;
 
-    /* Track 2: the pad through the MPC3000 voicing, long release. */
+    /* Track 2: PS1 choir pad, minor 9ths moving C -> Bb -> Ab -> Bb, one per bar. */
     Track *pad = &e->tr[1];
-    pad->p.machine = MACH_MPC3000;
+    pad->p.machine = MACH_PS1;
+    pad->p.srate = PS1_DEFAULT_RATE;
     pad->p.mode = MODE_SAMPLE;
-    pad->p.vol = 40;
-    pad->p.release = 600;
-    pad->p.lpf = 96;
-    load_demo(e, 1, "demo:pad");
-    pad->steps[0].on = 1;
-    pad->steps[0].val = SAMPLE_NOTE_CENTER;
-    pad->steps[8].on = 1;
-    pad->steps[8].val = SAMPLE_NOTE_CENTER - 2;
+    pad->p.chord = CHORD_MIN9;
+    pad->p.loop = 1;
+    pad->p.speed = 2; /* 1/4: one step per beat, 16 steps = 4 bars */
+    pad->p.attack = 350;
+    pad->p.release = 1400;
+    pad->p.vol = 46;
+    pad->p.vib = 6;
+    pad->p.rvb = 56;
+    load_builtin(e, 1, "synth:choir");
+    static const int pad_steps[] = {0, 4, 8, 12}, pad_vals[] = {12, 10, 8, 10};
+    set_steps(pad, pad_steps, pad_vals, 4);
+
+    /* Track 3: sub bass following the roots, also at quarter speed. */
+    Track *sub = &e->tr[2];
+    sub->p.machine = MACH_PS1;
+    sub->p.srate = PS1_DEFAULT_RATE;
+    sub->p.mode = MODE_SAMPLE;
+    sub->p.loop = 1;
+    sub->p.speed = 2;
+    sub->p.hold = 2;
+    sub->p.attack = 5;
+    sub->p.release = 120;
+    sub->p.vol = 50;
+    load_builtin(e, 2, "synth:sub");
+    static const int sub_steps[] = {0, 3, 4, 7, 8, 11, 12, 14}, sub_vals[] = {12, 12, 10, 10, 8, 8, 10, 10};
+    set_steps(sub, sub_steps, sub_vals, 8);
 }

@@ -21,12 +21,24 @@ sampler voicings, and sequence them with a gamepad.
   | SP1200 | 12 | 26.04 kHz | no interpolation | tracks 1–2 four-pole LPF, 3–6 fixed LPF, 7–8 unfiltered |
   | MPC60 | 12 (companded) | 40 kHz | linear | gentle LPF |
   | MPC3000 | 16 | 44.1 kHz | linear | gentle LPF + soft saturation |
+  | PS1 | 4-bit SPU-ADPCM | 5.5–44.1 kHz (incl. CD-XA 18.9/37.8 kHz) | SPU 4-point Gaussian, 4.12 pitch register | — |
 
-  These are approximations to tune by ear, not circuit models.
+  The vintage samplers are approximations to tune by ear. The PS1 voicing uses
+  the documented SPU behaviour (psx-spx): real ADPCM encode/decode, the
+  hardware Gaussian table and pitch-register quantisation.
+- **PS1 pad synth**: built-in, seamlessly looping CHOIR, STRINGS, GLASS, SAW and
+  SUB sources (additive, so loops have no seam) played through the PS1 voicing
+- **Chords** per track (MAJ, MIN, 7ths, 9ths, MIN11, SUS…) with up to 8 voices;
+  earlier chords fall into their release so pads overlap
+- **PS1 SPU reverb** send bus with the factory presets (Room, Studio S/M/L, Hall,
+  Half Echo, Space Echo, Chaos, Delay), running at 22.05 kHz like the hardware
+- **LOOP**, **HOLD** (note length in steps), **SPEED** (track runs at 1/2, 1/4 or
+  1/8 so one pattern can span several bars) and **VIB** (vibrato)
+- **.VAG** loading (PS1 SPU-ADPCM samples) with their loop points
 - **Cyclic time-stretch** in the Akai S950 style (STRTCH 25–400 %, CYCLE 5–250 ms)
 - Pitch, finetune (ProTracker 1/8-semitone steps), attack, release, reverse,
   GATE/THRU triggering, resonant low-pass, pan
-- WAV loading (8/16/24/32-bit PCM, 32-bit float, any rate, up to 60 s)
+- WAV loading (8/16/24/32-bit PCM, 32-bit float, any rate, up to 60 s) and .VAG
 - Plain-text project files, autosaved on exit
 - Built-in demo break and pad, so it makes noise straight away
 

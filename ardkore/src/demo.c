@@ -6,7 +6,12 @@
 #include <string.h>
 
 #include "dsp.h"
+#include "ps1.h"
 #include "wav.h"
+
+const char *const builtin_ids[BUILTIN_COUNT] = {
+    "demo:break", "demo:pad", "synth:choir", "synth:strings", "synth:glass", "synth:saw", "synth:sub",
+};
 
 static unsigned rng_state = 0x1234567u;
 
@@ -133,9 +138,90 @@ float *demo_pad(int *len)
     return buf;
 }
 
-int demo_load_source(const char *src_id, float **out, int *len, int *rate, char *name, int name_len,
-                     char *err, int errlen)
+/* ---- pad synth sources ------------------------------------------------------ */
+
+#define SYNTH_LOOP_S 2
+
+static float band(float f, float centre, float width)
 {
+    float d = (f - centre) / width;
+    return 1.0f / (1.0f + d * d);
+}
+
+/* Relative level of partial `h` (at `freq` Hz) for each timbre. */
+static float partial_amp(int kind, int h, float freq)
+{
+    float saw = 1.0f / h;
+    switch (kind) {
+    case SYNTH_CHOIR: /* "aah": formants around 700, 1150 and 2600 Hz */
+        return saw * (0.12f + band(freq, 700, 120) + 0.7f * band(freq, 1150, 130) + 0.35f * band(freq, 2600, 220));
+    case SYNTH_STRINGS:
+        return saw / (1.0f + (freq / 2200.0f) * (freq / 2200.0f));
+    case SYNTH_GLASS: {
+        static const float glass[9] = {0, 1.0f, 0.45f, 0.25f, 0.12f, 0, 0.08f, 0, 0.05f};
+        return h < 9 ? glass[h] : 0.0f;
+    }
+    case SYNTH_SAW:
+        return saw / (1.0f + (freq / 4000.0f) * (freq / 4000.0f));
+    default: /* SUB */
+        return h == 1 ? 1.0f : h == 2 ? 0.08f : 0.0f;
+    }
+}
+
+float *synth_source(int kind, int *len)
+{
+    int n = SYNTH_LOOP_S * DEMO_RATE;
+    float *buf = calloc((size_t)n, sizeof(float));
+    if (!buf) return NULL;
+    rng_state = 0xC0FFEEu + (unsigned)kind;
+
+    /* Fundamental in whole cycles per loop: C3 = 130.81 Hz -> 262 cycles in 2 s. */
+    int k0 = kind == SYNTH_SUB ? 131 : 262;
+    static const int detune2[] = {0, 1}, detune3[] = {-1, 0, 1}, detune5[] = {-2, -1, 0, 1, 2};
+    const int *detune = detune3;
+    int voices = 3;
+    if (kind == SYNTH_STRINGS) detune = detune5, voices = 5;
+    if (kind == SYNTH_GLASS) detune = detune2, voices = 2;
+    if (kind == SYNTH_SUB) detune = detune2, voices = 1;
+
+    for (int u = 0; u < voices; u++) {
+        int k = k0 + detune[u];
+        for (int h = 1;; h++) {
+            double freq = (double)h * k / SYNTH_LOOP_S;
+            if (freq > 9000.0 || freq > DEMO_RATE * 0.45) break;
+            float amp = partial_amp(kind, h, (float)freq);
+            if (amp <= 0.0f) continue;
+            /* Rotate a phasor: exact whole cycles over the loop, random start phase. */
+            double w = 2.0 * M_PI * h * k / n;
+            double ph = (noise() + 1.0) * M_PI;
+            double c = cos(ph), sn = sin(ph), cw = cos(w), sw = sin(w);
+            for (int i = 0; i < n; i++) {
+                buf[i] += amp * (float)sn;
+                double nc = c * cw - sn * sw;
+                sn = sn * cw + c * sw;
+                c = nc;
+            }
+        }
+    }
+    normalise(buf, n, 0.8f);
+    *len = n;
+    return buf;
+}
+
+static int has_ext(const char *path, const char *ext)
+{
+    size_t n = strlen(path), e = strlen(ext);
+    if (n <= e) return 0;
+    for (size_t i = 0; i < e; i++)
+        if ((path[n - e + i] | 32) != ext[i]) return 0;
+    return 1;
+}
+
+int demo_load_source(const char *src_id, float **out, int *len, int *rate, int *loop, char *name,
+                     int name_len, char *err, int errlen)
+{
+    static const char *const synth_names[SYNTH_COUNT] = {"choir", "strings", "glass", "saw", "sub"};
+    *loop = -1;
     if (!strcmp(src_id, "demo:break")) {
         *out = demo_break(len);
         *rate = DEMO_RATE;
@@ -148,7 +234,23 @@ int demo_load_source(const char *src_id, float **out, int *len, int *rate, char 
         snprintf(name, (size_t)name_len, "DEMO_PAD");
         return *out ? 0 : -1;
     }
-    if (wav_load_mono(src_id, out, len, rate, err, (size_t)errlen) != 0) return -1;
+    if (!strncmp(src_id, "synth:", 6)) {
+        for (int k = 0; k < SYNTH_COUNT; k++) {
+            if (strcmp(src_id + 6, synth_names[k]) != 0) continue;
+            *out = synth_source(k, len);
+            *rate = DEMO_RATE;
+            *loop = 0;
+            snprintf(name, (size_t)name_len, "SYNTH_%s", synth_names[k]);
+            for (char *c = name; *c; c++)
+                if (*c >= 'a' && *c <= 'z') *c -= 32;
+            return *out ? 0 : -1;
+        }
+        snprintf(err, (size_t)errlen, "UNKNOWN SYNTH SOURCE");
+        return -1;
+    }
+    int r = has_ext(src_id, ".vag") ? ps1_vag_load(src_id, out, len, rate, loop, err, (size_t)errlen)
+                                    : wav_load_mono(src_id, out, len, rate, err, (size_t)errlen);
+    if (r != 0) return -1;
     const char *base = strrchr(src_id, '/');
     base = base ? base + 1 : src_id;
     snprintf(name, (size_t)name_len, "%s", base);

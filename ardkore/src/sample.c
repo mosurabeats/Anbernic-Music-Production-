@@ -5,6 +5,8 @@
 #include <string.h>
 
 #include "dsp.h"
+#include "machine.h"
+#include "ps1.h"
 
 void sample_free(Sample *s)
 {
@@ -13,12 +15,14 @@ void sample_free(Sample *s)
     memset(s, 0, sizeof(*s));
 }
 
-void sample_set_source(Sample *s, float *mono, int len, int rate, const char *name)
+void sample_set_source(Sample *s, float *mono, int len, int rate, int loop, const char *name)
 {
     sample_free(s);
     s->src = mono;
     s->src_len = len;
     s->src_rate = rate;
+    s->src_loop = loop >= 0 && loop < len ? loop : -1;
+    s->loop_start = -1;
     strncpy(s->name, name ? name : "", SAMPLE_NAME_LEN - 1);
 }
 
@@ -37,7 +41,7 @@ float sample_quantise(float x, int bits, int nonlinear)
     return sign * (powf(1.0f + mu, y) - 1.0f) / mu;
 }
 
-int sample_bake(Sample *s, double rate, int bits, int nonlinear, int prefilter)
+int sample_bake(Sample *s, double rate, int bits, int nonlinear, int prefilter, int codec)
 {
     if (!s->src || s->src_len <= 0) return -1;
 
@@ -70,11 +74,14 @@ int sample_bake(Sample *s, double rate, int bits, int nonlinear, int prefilter)
         out[i] = sample_quantise(a + (b - a) * frac, bits, nonlinear);
     }
     free(filtered);
+    if (codec == CODEC_PS1_ADPCM) ps1_adpcm_roundtrip(out, len);
 
     free(s->data);
     s->data = out;
     s->len = len;
     s->rate = rate;
+    s->loop_start = s->src_loop >= 0 ? (int)((double)s->src_loop * rate / s->src_rate) : -1;
+    if (s->loop_start >= len) s->loop_start = -1;
     s->nslices = 1;
     s->slice[0] = 0;
     s->slice[1] = len;

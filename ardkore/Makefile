@@ -5,7 +5,7 @@ PKG_CONFIG ?= pkg-config
 CFLAGS ?= -O2
 CFLAGS += -std=gnu99 -Wall -Wextra -Wno-format-truncation -Isrc
 
-CORE := src/engine.c src/sample.c src/wav.c src/machine.c src/demo.c \
+CORE := src/engine.c src/sample.c src/wav.c src/machine.c src/demo.c src/ps1.c \
         src/params.c src/project.c src/ui.c src/font.c
 
 SDL_CFLAGS := $(shell $(PKG_CONFIG) --cflags sdl2)

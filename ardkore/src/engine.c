@@ -8,6 +8,36 @@
 #include "params.h"
 
 const int roll_divs[ROLL_COUNT] = {1, 2, 3, 4, 6, 8};
+const int speed_divs[SPEED_COUNT] = {1, 2, 4, 8};
+
+#define CUT_FADE_S 0.004f
+#define VIB_RATE_HZ 5.5f
+#define RELEASE_FLOOR 1e-3f
+
+static const int chord_table[CHORD_COUNT][7] = {
+    /* count, tones... */
+    {1, 0},
+    {3, 0, 4, 7},
+    {3, 0, 3, 7},
+    {4, 0, 4, 7, 11},
+    {4, 0, 3, 7, 10},
+    {4, 0, 4, 7, 10},
+    {5, 0, 4, 7, 11, 14},
+    {5, 0, 3, 7, 10, 14},
+    {6, 0, 3, 7, 10, 14, 17},
+    {3, 0, 2, 7},
+    {3, 0, 5, 7},
+    {2, 0, 7},
+    {2, 0, 12},
+};
+
+int engine_chord_tones(int chord, int *tones)
+{
+    if (chord < 0 || chord >= CHORD_COUNT) chord = CHORD_OFF;
+    int n = chord_table[chord][0];
+    for (int i = 0; i < n; i++) tones[i] = chord_table[chord][1 + i];
+    return n;
+}
 
 void engine_track_defaults(Track *t)
 {
@@ -19,6 +49,8 @@ void engine_track_defaults(Track *t)
         t->steps[i].vel = 64;
     }
     t->filter_lpf = -1;
+    t->lfo_s = 0.0f;
+    t->lfo_c = 1.0f;
 }
 
 void engine_init(Engine *e, int sr)
@@ -28,6 +60,10 @@ void engine_init(Engine *e, int sr)
     e->bpm = 170;
     e->swing = 50;
     e->master = 80;
+    e->rvb_preset = PS1_RVB_OFF;
+    e->rvb_level = 60;
+    ps1_reverb_init(&e->rvb, e->rvb_preset);
+    e->rvb_applied = e->rvb_preset;
     for (int t = 0; t < NUM_TRACKS; t++) engine_track_defaults(&e->tr[t]);
 }
 
@@ -38,8 +74,7 @@ void engine_free(Engine *e)
 
 static void stop_voices(Track *t)
 {
-    t->v.active = 0;
-    t->tail.active = 0;
+    for (int i = 0; i < MAX_VOICES; i++) t->voice[i].active = 0;
 }
 
 void engine_track_reslice(Engine *e, int track)
@@ -58,16 +93,17 @@ void engine_track_rebake(Engine *e, int track)
     Track *t = &e->tr[track];
     if (!t->smp.src) return;
     const Machine *m = &machines[t->p.machine];
-    sample_bake(&t->smp, machine_bake_rate(t->p.machine, t->p.srate), m->bits, m->nonlinear, m->prefilter);
+    sample_bake(&t->smp, machine_bake_rate(t->p.machine, t->p.srate), m->bits, m->nonlinear, m->prefilter,
+                m->codec);
     engine_track_reslice(e, track);
 }
 
-void engine_track_load(Engine *e, int track, float *mono, int len, int rate,
+void engine_track_load(Engine *e, int track, float *mono, int len, int rate, int loop,
                        const char *name, const char *src_id)
 {
     Track *t = &e->tr[track];
     stop_voices(t);
-    sample_set_source(&t->smp, mono, len, rate, name);
+    sample_set_source(&t->smp, mono, len, rate, loop, name);
     strncpy(t->src_id, src_id ? src_id : "", SRC_ID_LEN - 1);
     t->src_id[SRC_ID_LEN - 1] = 0;
     engine_track_rebake(e, track);
@@ -88,6 +124,55 @@ int engine_default_val(const Engine *e, int track, int step)
     if (t->p.mode == MODE_SAMPLE) return SAMPLE_NOTE_CENTER;
     int n = t->smp.nslices > 0 ? t->smp.nslices : 1;
     return step % n;
+}
+
+int engine_track_step(const Engine *e, int track)
+{
+    int div = speed_divs[e->tr[track].p.speed];
+    return (int)((e->tick / (uint32_t)div) % NUM_STEPS);
+}
+
+int engine_active_voices(const Engine *e, int track)
+{
+    int n = 0;
+    for (int i = 0; i < MAX_VOICES; i++) n += e->tr[track].voice[i].active;
+    return n;
+}
+
+const Voice *engine_newest_voice(const Engine *e, int track)
+{
+    const Track *t = &e->tr[track];
+    return &t->voice[t->newest];
+}
+
+static void start_release(Voice *v, int release_len)
+{
+    float level = v->attack_len > 0 && v->age < v->attack_len ? (float)v->age / v->attack_len : 1.0f;
+    if (release_len < 1) release_len = 1;
+    v->releasing = 1;
+    v->rel_env = level;
+    v->rel_mul = expf(logf(RELEASE_FLOOR) / release_len);
+}
+
+static void cut_voice(Voice *v, int sr)
+{
+    if (v->fade_step > 0.0f) return;
+    v->fade = 1.0f;
+    v->fade_step = 1.0f / (CUT_FADE_S * sr);
+}
+
+static Voice *alloc_voice(Track *t)
+{
+    int best = 0;
+    for (int i = 0; i < MAX_VOICES; i++) {
+        if (!t->voice[i].active) {
+            t->newest = i;
+            return &t->voice[i];
+        }
+        if (t->voice[i].age > t->voice[best].age) best = i;
+    }
+    t->newest = best; /* steal the oldest */
+    return &t->voice[best];
 }
 
 void engine_trigger(Engine *e, int track, int val, int vel)
@@ -114,60 +199,113 @@ void engine_trigger(Engine *e, int track, int val, int vel)
         else hi = s->len;
     }
     if (hi - lo < 2) return;
+    int loop_lo = -1;
+    if (p->loop) loop_lo = s->loop_start > lo && s->loop_start < hi - 1 ? s->loop_start : lo;
 
-    Voice *v = &t->v;
-    if (v->active) {
-        t->tail = *v;
-        t->tail_fade = 1.0f;
+    /* Earlier notes: slices are cut, sampled/pad notes fall into their release. */
+    int release_len = p->release * e->sr / 1000;
+    int min_release = (int)(CUT_FADE_S * e->sr);
+    for (int i = 0; i < MAX_VOICES; i++) {
+        Voice *v = &t->voice[i];
+        if (!v->active) continue;
+        if (p->mode == MODE_SLICE) cut_voice(v, e->sr);
+        else if (!v->releasing) start_release(v, release_len > min_release ? release_len : min_release);
     }
-    v->dir = p->rev ? -1 : 1;
-    v->lo = lo;
-    v->hi = hi;
-    v->pos = p->rev ? hi - 1 : lo;
-    v->anchor = v->pos;
-    v->grain = 0.0;
-    v->inc = machine_play_rate(p->machine, p->srate, semis) / e->sr;
-    v->age = 0;
-    v->attack_len = p->attack * e->sr / 1000;
-    v->release_len = p->release * e->sr / 1000;
-    v->gain = (vel / 64.0f) * (p->vol / 64.0f);
-    v->active = 1;
+
+    int tones[7];
+    int n = engine_chord_tones(p->chord, tones);
+    float gain = (vel / 64.0f) * (p->vol / 64.0f) / sqrtf((float)n);
+    int gate = -1;
+    if (p->hold > 0) gate = (int)(p->hold * speed_divs[p->speed] * (e->sr * 60.0 / (e->bpm * 4.0)));
+
+    for (int k = 0; k < n; k++) {
+        Voice *v = alloc_voice(t);
+        memset(v, 0, sizeof(*v));
+        v->dir = p->rev ? -1 : 1;
+        v->lo = lo;
+        v->hi = hi;
+        v->loop_lo = loop_lo;
+        v->pos = p->rev ? hi - 1 : lo;
+        v->anchor = v->pos;
+        v->inc = machine_play_rate(p->machine, p->srate, semis + tones[k]) / e->sr;
+        v->attack_len = p->attack * e->sr / 1000;
+        v->release_len = release_len;
+        v->gate = gate;
+        v->gain = gain;
+        v->active = 1;
+    }
 }
 
-static float voice_tick(Track *t, Voice *v)
-{
-    if (!v->active) return 0.0f;
-    const Sample *s = &t->smp;
-    const TrackParams *p = &t->p;
+static float gauss_f[512];
+static int gauss_ready;
 
-    int i = (int)v->pos;
-    if (i < v->lo) i = v->lo;
-    if (i >= v->hi) i = v->hi - 1;
-    float x = s->data[i];
-    if (machines[p->machine].interpolate) {
-        int j = i + 1 < s->len ? i + 1 : i;
-        float frac = (float)(v->pos - i);
+static float sample_at(const Sample *s, int i) { return i >= 0 && i < s->len ? s->data[i] : 0.0f; }
+
+static float read_sample(const Sample *s, const Voice *v, int interp)
+{
+    int k = (int)v->pos;
+    if (interp == INTERP_GAUSS) {
+        /* SPU 4-point Gaussian over the newest four samples in play order. */
+        double frac = v->pos - k;
+        if (v->dir < 0) frac = 1.0 - frac;
+        int f = (int)(frac * 256.0);
+        if (f > 255) f = 255;
+        int d = v->dir;
+        return gauss_f[255 - f] * sample_at(s, k - 3 * d) + gauss_f[511 - f] * sample_at(s, k - 2 * d) +
+               gauss_f[256 + f] * sample_at(s, k - d) + gauss_f[f] * sample_at(s, k);
+    }
+    if (k < v->lo) k = v->lo;
+    if (k >= v->hi) k = v->hi - 1;
+    float x = s->data[k];
+    if (interp == INTERP_LINEAR) {
+        int j = k + 1 < s->len ? k + 1 : k;
+        float frac = (float)(v->pos - k);
         if (frac < 0.0f) frac = 0.0f;
         x += (s->data[j] - x) * frac;
     }
+    return x;
+}
 
-    /* Envelope: linear attack, release fades into the end of the region. */
-    float env = 1.0f;
-    if (v->attack_len > 0 && v->age < v->attack_len) env = (float)v->age / v->attack_len;
+static float voice_tick(Track *t, Voice *v, float pitch_mul)
+{
+    const Sample *s = &t->smp;
+    const TrackParams *p = &t->p;
+    float x = read_sample(s, v, machines[p->machine].interpolate);
+
+    /* Envelope. */
+    float env;
+    if (v->releasing) {
+        env = v->rel_env;
+        v->rel_env *= v->rel_mul;
+        if (v->rel_env < RELEASE_FLOOR) v->active = 0;
+    } else {
+        env = v->attack_len > 0 && v->age < v->attack_len ? (float)v->age / v->attack_len : 1.0f;
+        if (v->gate >= 0 && v->age >= v->gate) start_release(v, v->release_len);
+    }
     double ratio = p->stretch / 100.0;
-    double head = p->stretch == 100 ? v->pos : v->anchor;
-    double speed = v->inc / (p->stretch == 100 ? 1.0 : ratio);
-    double remain = (v->dir > 0 ? v->hi - head : head - v->lo) / speed;
-    if (v->release_len > 0 && remain < v->release_len) env *= (float)(remain / v->release_len);
+    double step = v->inc * pitch_mul;
+    if (v->loop_lo < 0 && v->gate < 0 && !v->releasing && v->release_len > 0) {
+        /* One-shots fade out into the end of their region. */
+        double head = p->stretch == 100 ? v->pos : v->anchor;
+        double speed = step / (p->stretch == 100 ? 1.0 : ratio);
+        double remain = (v->dir > 0 ? v->hi - head : head - v->lo) / speed;
+        if (remain < v->release_len) env *= (float)(remain / v->release_len);
+    }
+    if (v->fade_step > 0.0f) {
+        env *= v->fade;
+        v->fade -= v->fade_step;
+        if (v->fade <= 0.0f) v->active = 0;
+    }
     float out = x * env * v->gain;
 
     /* Advance. Cyclic stretch (S950 style): the read head plays grains at the
      * pitched rate and jumps back to an anchor that moves at the stretched rate. */
     v->age++;
-    v->pos += v->inc * v->dir;
+    v->pos += step * v->dir;
+    double head;
     if (p->stretch != 100) {
-        v->anchor += v->inc * v->dir / ratio;
-        v->grain += v->inc;
+        v->anchor += step * v->dir / ratio;
+        v->grain += step;
         double cycle = p->cycle * s->rate / 1000.0;
         if (v->grain >= cycle) {
             v->pos = v->anchor;
@@ -177,7 +315,12 @@ static float voice_tick(Track *t, Voice *v)
     } else {
         head = v->pos;
     }
-    if (v->dir > 0 ? head >= v->hi : head < v->lo) {
+    int past = v->dir > 0 ? head >= v->hi : head < v->lo;
+    if (past && v->loop_lo >= 0) {
+        double span = v->dir > 0 ? v->hi - v->loop_lo : v->hi - v->lo;
+        v->pos -= span * v->dir;
+        v->anchor -= span * v->dir;
+    } else if (past) {
         v->active = 0;
     } else if (v->dir > 0 ? v->pos >= v->hi : v->pos < v->lo) {
         v->pos = v->anchor;
@@ -217,6 +360,9 @@ static void update_filters(Engine *e, int ti)
     case MACH_MPC60:
         biquad_lowpass(&t->fixed, 15000.0f, 0.707f, sr);
         break;
+    case MACH_PS1:
+        t->fixed_on = 0; /* the Gaussian interpolation already does the smoothing */
+        break;
     default:
         biquad_lowpass(&t->fixed, 18000.0f, 0.707f, sr);
         break;
@@ -236,8 +382,10 @@ static double step_length(const Engine *e, int step)
 static void fire_step(Engine *e)
 {
     for (int t = 0; t < NUM_TRACKS; t++) {
-        const Step *st = &e->tr[t].steps[e->step];
         e->roll_next[t] = NUM_STEPS; /* nothing pending */
+        int div = speed_divs[e->tr[t].p.speed];
+        if (e->tick % (uint32_t)div) continue;
+        const Step *st = &e->tr[t].steps[engine_track_step(e, t)];
         if (!st->on) continue;
         engine_trigger(e, t, st->val, st->vel);
         if (roll_divs[st->roll] > 1) e->roll_next[t] = 1;
@@ -248,6 +396,7 @@ void engine_play(Engine *e, int on)
 {
     e->playing = on;
     if (!on) return;
+    e->tick = 0;
     e->step = 0;
     e->step_pos = 0.0;
     e->step_len = step_length(e, 0);
@@ -258,14 +407,15 @@ static void sequencer_tick(Engine *e)
 {
     if (e->step_pos >= e->step_len) {
         e->step_pos -= e->step_len;
-        e->step = (e->step + 1) % NUM_STEPS;
+        e->tick++;
+        e->step = (int)(e->tick % NUM_STEPS);
         e->step_len = step_length(e, e->step);
         fire_step(e);
     }
     for (int t = 0; t < NUM_TRACKS; t++) {
         int k = e->roll_next[t];
         if (k >= NUM_STEPS) continue;
-        const Step *st = &e->tr[t].steps[e->step];
+        const Step *st = &e->tr[t].steps[engine_track_step(e, t)];
         int div = roll_divs[st->roll];
         if (k >= div) continue;
         if (e->step_pos >= e->step_len * k / div) {
@@ -278,29 +428,43 @@ static void sequencer_tick(Engine *e)
 
 void engine_render(Engine *e, float *lr, int frames)
 {
-    float pan_l[NUM_TRACKS], pan_r[NUM_TRACKS];
+    if (!gauss_ready) {
+        for (int i = 0; i < 512; i++) gauss_f[i] = ps1_gauss[i] / 32768.0f;
+        gauss_ready = 1;
+    }
+    if (e->rvb_applied != e->rvb_preset) {
+        ps1_reverb_init(&e->rvb, e->rvb_preset);
+        e->rvb_applied = e->rvb_preset;
+    }
+
+    float pan_l[NUM_TRACKS], pan_r[NUM_TRACKS], send[NUM_TRACKS];
     for (int t = 0; t < NUM_TRACKS; t++) {
         update_filters(e, t);
         float a = (e->tr[t].p.pan + 32) / 64.0f * (float)M_PI * 0.5f;
         pan_l[t] = cosf(a);
         pan_r[t] = sinf(a);
+        send[t] = e->tr[t].p.rvb / 64.0f;
     }
     float master = e->master / 100.0f;
-    float tail_step = 1.0f / (0.004f * e->sr);
+    float wet = e->rvb_level / 100.0f;
+    float lfo_w = 2.0f * (float)M_PI * VIB_RATE_HZ / e->sr;
     float peak = 0.0f;
 
     for (int f = 0; f < frames; f++) {
         if (e->playing) sequencer_tick(e);
-        float l = 0.0f, r = 0.0f;
+        float l = 0.0f, r = 0.0f, sl = 0.0f, sr = 0.0f;
         for (int ti = 0; ti < NUM_TRACKS; ti++) {
             Track *t = &e->tr[ti];
             const TrackParams *p = &t->p;
-            float x = voice_tick(t, &t->v);
-            if (t->tail.active) {
-                x += voice_tick(t, &t->tail) * t->tail_fade;
-                t->tail_fade -= tail_step;
-                if (t->tail_fade <= 0.0f) t->tail.active = 0;
+            float pitch_mul = 1.0f;
+            if (p->vib > 0) {
+                t->lfo_s += lfo_w * t->lfo_c;
+                t->lfo_c -= lfo_w * t->lfo_s;
+                pitch_mul = 1.0f + p->vib * t->lfo_s * (0.6931472f / 1200.0f);
             }
+            float x = 0.0f;
+            for (int i = 0; i < MAX_VOICES; i++)
+                if (t->voice[i].active) x += voice_tick(t, &t->voice[i], pitch_mul);
             if (p->lpf < 127) {
                 x = svf_lp(&t->lp[0], x);
                 if (p->machine == MACH_SP1200 && ti < 2) x = svf_lp(&t->lp[1], x);
@@ -308,11 +472,16 @@ void engine_render(Engine *e, float *lr, int frames)
             if (p->machine == MACH_AMIGA && p->afilt != AFILT_A1200) x = onepole_lp(&t->a500, x);
             if (t->fixed_on) x = biquad_run(&t->fixed, x);
             if (p->machine == MACH_MPC3000) x = tanhf(x * 1.2f) / 1.2f;
-            l += x * pan_l[ti];
-            r += x * pan_r[ti];
+            float xl = x * pan_l[ti], xr = x * pan_r[ti];
+            l += xl;
+            r += xr;
+            sl += xl * send[ti];
+            sr += xr * send[ti];
         }
-        l = tanhf(l * master);
-        r = tanhf(r * master);
+        float wl, wr;
+        ps1_reverb_run(&e->rvb, sl, sr, &wl, &wr);
+        l = tanhf((l + wl * wet) * master);
+        r = tanhf((r + wr * wet) * master);
         lr[2 * f] = l;
         lr[2 * f + 1] = r;
         float a = fabsf(l) > fabsf(r) ? fabsf(l) : fabsf(r);

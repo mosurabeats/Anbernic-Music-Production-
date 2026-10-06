@@ -35,7 +35,7 @@ const char *const ui_button_names[BTN_COUNT] = {
 
 static const char *const page_names[PAGE_COUNT] = {"SEQ", "SMP", "FIL", "PRJ"};
 
-enum { PRJ_BPM, PRJ_SWING, PRJ_MASTER, PRJ_SAVE, PRJ_RELOAD, PRJ_NEW, PRJ_CLEAR, PRJ_COUNT };
+enum { PRJ_BPM, PRJ_SWING, PRJ_MASTER, PRJ_REVERB, PRJ_RVB_LEVEL, PRJ_SAVE, PRJ_RELOAD, PRJ_NEW, PRJ_CLEAR, PRJ_COUNT };
 
 /* ---- drawing ---------------------------------------------------------- */
 
@@ -119,16 +119,16 @@ static void audition(Ui *ui, int val)
 
 /* ---- file browser ----------------------------------------------------- */
 
-static int has_wav_ext(const char *name)
+static int has_sample_ext(const char *name)
 {
     size_t n = strlen(name);
-    return n > 4 && !strcasecmp(name + n - 4, ".wav");
+    return n > 4 && (!strcasecmp(name + n - 4, ".wav") || !strcasecmp(name + n - 4, ".vag"));
 }
 
 static int entry_cmp(const void *a, const void *b)
 {
     const FileEntry *x = a, *y = b;
-    if (x->kind != y->kind) return y->kind - x->kind; /* demo, parent, dirs, then wavs */
+    if (x->kind != y->kind) return y->kind - x->kind; /* dirs, then samples */
     return strcasecmp(x->name, y->name);
 }
 
@@ -136,10 +136,10 @@ static void scan_dir(Ui *ui)
 {
     ui->nfiles = 0;
     FileEntry *f = ui->files;
-    snprintf(f[ui->nfiles].name, sizeof f->name, "BREAK");
-    f[ui->nfiles++].kind = 3;
-    snprintf(f[ui->nfiles].name, sizeof f->name, "PAD");
-    f[ui->nfiles++].kind = 3;
+    for (int i = 0; i < BUILTIN_COUNT; i++) {
+        snprintf(f[ui->nfiles].name, sizeof f->name, "%s", builtin_ids[i]);
+        f[ui->nfiles++].kind = 3;
+    }
     if (strcmp(ui->browse_dir, "/") != 0) {
         snprintf(f[ui->nfiles].name, sizeof f->name, "..");
         f[ui->nfiles++].kind = 2;
@@ -157,14 +157,16 @@ static void scan_dir(Ui *ui)
             if (stat(path, &st) != 0) continue;
             int kind;
             if (S_ISDIR(st.st_mode)) kind = 1;
-            else if (has_wav_ext(de->d_name)) kind = 0;
+            else if (has_sample_ext(de->d_name)) kind = 0;
             else continue;
             snprintf(f[ui->nfiles].name, sizeof f->name, "%s", de->d_name);
             f[ui->nfiles++].kind = kind;
         }
         closedir(d);
     }
-    qsort(ui->files, (size_t)ui->nfiles, sizeof(FileEntry), entry_cmp);
+    /* Built-ins and ".." stay first, in order; sort the folder's contents. */
+    int fixed = BUILTIN_COUNT + (strcmp(ui->browse_dir, "/") != 0);
+    qsort(ui->files + fixed, (size_t)(ui->nfiles - fixed), sizeof(FileEntry), entry_cmp);
     ui->file_cur = clampi(ui->file_cur, 0, ui->nfiles - 1);
 }
 
@@ -193,21 +195,21 @@ static void load_entry(Ui *ui)
         return;
     }
     char id[SRC_ID_LEN];
-    if (fe->kind == 3) snprintf(id, sizeof id, "demo:%s", !strcmp(fe->name, "BREAK") ? "break" : "pad");
+    if (fe->kind == 3) snprintf(id, sizeof id, "%s", fe->name);
     else if (strlen(ui->browse_dir) + strlen(fe->name) + 2 > sizeof id) {
         ui_status(ui, "PATH TOO LONG");
         return;
     } else snprintf(id, sizeof id, "%s/%s", strcmp(ui->browse_dir, "/") ? ui->browse_dir : "", fe->name);
 
     float *mono;
-    int len, rate;
+    int len, rate, loop;
     char name[SAMPLE_NAME_LEN], err[64];
-    if (demo_load_source(id, &mono, &len, &rate, name, sizeof name, err, sizeof err) != 0) {
+    if (demo_load_source(id, &mono, &len, &rate, &loop, name, sizeof name, err, sizeof err) != 0) {
         ui_status(ui, err);
         return;
     }
     lock(ui);
-    engine_track_load(ui->eng, ui->track, mono, len, rate, name, id);
+    engine_track_load(ui->eng, ui->track, mono, len, rate, loop, name, id);
     if (!ui->eng->playing) engine_trigger(ui->eng, ui->track, 0, 64);
     unlock(ui);
     ui->sel_slice[ui->track] = 0;
@@ -223,10 +225,12 @@ static void set_param(Ui *ui, int idx, int value)
     Track *t = cur_track(ui);
     const ParamDef *d = &param_defs[idx];
     value = clampi(value, d->min, d->max);
+    if (d->offset == offsetof(TrackParams, srate)) value = clampi(value, 0, machine_rate_count(t->p.machine) - 1);
     int *ptr = param_ptr(&t->p, idx);
     if (*ptr == value) return;
     lock(ui);
     *ptr = value;
+    if (d->offset == offsetof(TrackParams, machine)) t->p.srate = machine_default_rate(value);
     if (d->flags & PF_REBAKE) engine_track_rebake(ui->eng, ui->track);
     else if (d->flags & PF_RESLICE) engine_track_reslice(ui->eng, ui->track);
     unlock(ui);
@@ -286,6 +290,8 @@ static void project_edit(Ui *ui, int delta)
     if (ui->proj_cur == PRJ_BPM) e->bpm = clampi(e->bpm + delta, 40, 300);
     if (ui->proj_cur == PRJ_SWING) e->swing = clampi(e->swing + delta, 50, 75);
     if (ui->proj_cur == PRJ_MASTER) e->master = clampi(e->master + delta, 0, 100);
+    if (ui->proj_cur == PRJ_REVERB && delta) e->rvb_preset = (e->rvb_preset + (delta > 0 ? 1 : PS1_RVB_COUNT - 1)) % PS1_RVB_COUNT;
+    if (ui->proj_cur == PRJ_RVB_LEVEL) e->rvb_level = clampi(e->rvb_level + delta, 0, 100);
     unlock(ui);
 }
 
@@ -519,7 +525,7 @@ static void draw_wave(Ui *ui, int x, int y, int w, int h, int ti, int sel)
         int px = x + (int)((long long)s->slice[i] * w / s->len);
         for (int yy = y; yy < y + h; yy += 3) pixel(ui, px, yy, COL_INK);
     }
-    const Voice *v = &t->v;
+    const Voice *v = engine_newest_voice(ui->eng, ti);
     if (v->active) {
         int px = x + (int)(v->pos * w / s->len);
         vline(ui, px, y, y + h - 1, COL_HOT);
@@ -544,7 +550,7 @@ static void draw_seq(Ui *ui)
     for (int s = 0; s < NUM_STEPS; s++) {
         int x = x0 + s * 3 * CW;
         uint32_t c = (s % 4 == 0) ? COL_INK : COL_DIM;
-        if (e->playing && s == e->step) {
+        if (e->playing && s == engine_track_step(e, ui->track)) {
             fill(ui, x - 1, y0 - 1, 2 * CW + 1, CH + 1, COL_HOT);
             c = COL_BG;
         }
@@ -563,7 +569,7 @@ static void draw_seq(Ui *ui)
             const Step *st = &t->steps[s];
             int x = x0 + s * 3 * CW;
             int cursor = ti == ui->track && s == ui->seq_step;
-            int playing = e->playing && s == e->step && st->on;
+            int playing = e->playing && s == engine_track_step(e, ti) && st->on;
             uint32_t fg = st->on ? COL_INK : COL_DIM;
             if (cursor) {
                 fill(ui, x - 1, y - 2, 2 * CW + 1, CH + 3, COL_INK);
@@ -604,9 +610,9 @@ static void draw_sample(Ui *ui)
 {
     Track *t = cur_track(ui);
     int sel = t->p.mode == MODE_SLICE ? ui->sel_slice[ui->track] : -1;
-    draw_wave(ui, 4, 22, SCREEN_W - 8, 72, ui->track, sel);
+    draw_wave(ui, 4, 22, SCREEN_W - 8, 56, ui->track, sel);
 
-    int gy = 102, cw = 79, chh = 14;
+    int gy = 82, cw = 79, chh = 14;
     for (int i = 0; i < param_count; i++) {
         int col = i % 4, row = i / 4;
         int x = 2 + col * cw, y = gy + row * chh;
@@ -657,25 +663,33 @@ static void draw_files(Ui *ui)
         char name[52];
         snprintf(name, sizeof name, "%s", fe->name);
         switch (fe->kind) {
-        case 3: textf(ui, 4, y, fg, "[DEMO] %s", name); break;
+        case 3: {
+            char kind[16];
+            const char *colon = strchr(name, ':');
+            snprintf(kind, sizeof kind, "%.*s", colon ? (int)(colon - name) : 0, name);
+            for (char *c = kind; *c; c++) *c = (char)(*c - 32 * (*c >= 'a' && *c <= 'z'));
+            textf(ui, 4, y, fg, "[%s] %s", kind, colon ? colon + 1 : name);
+            break;
+        }
         case 2: text(ui, 4, y, "../", fg); break;
         case 1: textf(ui, 4, y, fg, "%s/", name); break;
         default: text(ui, 4, y, name, fg); break;
         }
     }
-    if (ui->nfiles <= 3) text(ui, 4, y0 + 4 * 9, "(PUT .WAV FILES IN THE SAMPLES FOLDER)", COL_DIM);
+    if (ui->nfiles <= BUILTIN_COUNT + 1)
+        text(ui, 4, y0 + (BUILTIN_COUNT + 2) * 9, "(PUT .WAV/.VAG FILES IN THE SAMPLES FOLDER)", COL_DIM);
 }
 
 static void draw_project(Ui *ui)
 {
     Engine *e = ui->eng;
-    const char *labels[PRJ_COUNT] = {"BPM", "SWING", "MASTER", "SAVE PROJECT", "RELOAD PROJECT",
+    const char *labels[PRJ_COUNT] = {"BPM", "SWING", "MASTER", "PS1 REVERB", "REVERB LEVEL", "SAVE PROJECT", "RELOAD PROJECT",
                                      "NEW DEMO PROJECT", "CLEAR TRACK"};
     for (int i = 0; i < PRJ_COUNT; i++) {
-        int y = 24 + i * 12;
+        int y = 22 + i * 10;
         uint32_t fg = COL_INK;
         if (i == ui->proj_cur) {
-            fill(ui, 2, y - 2, 160, CH + 3, COL_INK);
+            fill(ui, 2, y - 1, 160, CH + 1, COL_INK);
             fg = COL_BG;
         }
         text(ui, 6, y, labels[i], fg);
@@ -683,6 +697,8 @@ static void draw_project(Ui *ui)
         if (i == PRJ_BPM) snprintf(val, sizeof val, "%d", e->bpm);
         if (i == PRJ_SWING) snprintf(val, sizeof val, "%d%%", e->swing);
         if (i == PRJ_MASTER) snprintf(val, sizeof val, "%d", e->master);
+        if (i == PRJ_REVERB) snprintf(val, sizeof val, "%s", ps1_reverb_names[e->rvb_preset]);
+        if (i == PRJ_RVB_LEVEL) snprintf(val, sizeof val, "%d", e->rvb_level);
         if (i == PRJ_CLEAR) snprintf(val, sizeof val, "T%d", ui->track + 1);
         text_right(ui, 158, y, val, fg);
     }
@@ -694,7 +710,7 @@ static void draw_project(Ui *ui)
         "X/Y       PREV/NEXT SLICE (SMP PAGE)",
         "Y+DPAD    STEP VELOCITY (SEQ PAGE)",
     };
-    for (int i = 0; i < 6; i++) text(ui, 4, 114 + i * 10, help[i], COL_DIM);
+    for (int i = 0; i < 6; i++) text(ui, 4, 120 + i * 9, help[i], COL_DIM);
     for (int i = 0; i < 3; i++) text(ui, 4, 182 + i * 10, ui->info[i], COL_INK);
 }
 

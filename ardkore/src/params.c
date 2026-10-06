@@ -5,12 +5,15 @@
 
 #include "machine.h"
 
-static const char *const machine_labels[] = {"AMIGA", "SP1200", "MPC60", "MPC3000"};
+static const char *const machine_labels[] = {"AMIGA", "SP1200", "MPC60", "MPC3000", "PS1"};
 static const char *const mode_labels[] = {"SLICE", "SAMPLE"};
 static const char *const afilt_labels[] = {"A1200", "A500", "LED"};
 static const char *const trig_labels[] = {"GATE", "THRU"};
 static const char *const onoff_labels[] = {"OFF", "ON"};
 static const char *const chop_labels[] = {"EQUAL", "AUTO"};
+static const char *const chord_labels[] = {"OFF", "MAJ", "MIN", "MAJ7", "MIN7", "DOM7", "MAJ9",
+                                           "MIN9", "MIN11", "SUS2", "SUS4", "5TH", "OCT"};
+static const char *const speed_labels[] = {"1X", "1/2", "1/4", "1/8"};
 
 #define P(name, key, field, min, max, def, step, coarse, flags, labels) \
     {name, key, offsetof(TrackParams, field), min, max, def, step, coarse, flags, labels}
@@ -27,9 +30,14 @@ const ParamDef param_defs[] = {
     P("VOL", "vol", vol, 0, 64, 64, 1, 8, 0, NULL),
     P("PAN", "pan", pan, -32, 32, 0, 1, 8, 0, NULL),
 
-    P("ATTACK", "attack", attack, 0, 500, 0, 1, 10, 0, NULL),
-    P("RELEAS", "release", release, 0, 2000, 10, 5, 50, 0, NULL),
+    P("ATTACK", "attack", attack, 0, 2000, 0, 5, 50, 0, NULL),
+    P("RELEAS", "release", release, 0, 4000, 10, 5, 100, 0, NULL),
+    P("HOLD", "hold", hold, 0, 16, 0, 1, 4, 0, NULL),
     P("TRIG", "trig", trig, 0, 1, TRIG_GATE, 1, 1, 0, trig_labels),
+
+    P("CHORD", "chord", chord, 0, CHORD_COUNT - 1, CHORD_OFF, 1, 1, 0, chord_labels),
+    P("LOOP", "loop", loop, 0, 1, 0, 1, 1, 0, onoff_labels),
+    P("SPEED", "speed", speed, 0, SPEED_COUNT - 1, 0, 1, 1, 0, speed_labels),
     P("REV", "rev", rev, 0, 1, 0, 1, 1, 0, onoff_labels),
 
     P("CHOP", "chop", chop, 0, 1, CHOP_EQUAL, 1, 1, PF_RESLICE, chop_labels),
@@ -40,6 +48,9 @@ const ParamDef param_defs[] = {
     P("LPF", "lpf", lpf, 0, 127, 127, 1, 8, 0, NULL),
     P("STRTCH", "stretch", stretch, 25, 400, 100, 5, 25, 0, NULL),
     P("CYCLE", "cycle", cycle, 5, 250, 40, 1, 10, 0, NULL),
+    P("VIB", "vib", vib, 0, 50, 0, 1, 5, 0, NULL),
+
+    P("RVB", "rvb", rvb, 0, 64, 0, 1, 8, 0, NULL),
 };
 
 const int param_count = (int)(sizeof(param_defs) / sizeof(param_defs[0]));
@@ -71,10 +82,7 @@ void param_format(const TrackParams *p, int index, char *buf, size_t len)
     }
     switch (d->offset) {
     case offsetof(TrackParams, srate):
-        if (p->machine == MACH_AMIGA)
-            snprintf(buf, len, "%d", (int)(pt_rate(v) + 0.5));
-        else
-            snprintf(buf, len, "%d", machines[p->machine].native_rate);
+        snprintf(buf, len, "%d", (int)(machine_bake_rate(p->machine, v) + 0.5));
         break;
     case offsetof(TrackParams, pitch):
     case offsetof(TrackParams, fine):
@@ -87,6 +95,10 @@ void param_format(const TrackParams *p, int index, char *buf, size_t len)
         break;
     case offsetof(TrackParams, stretch):
         snprintf(buf, len, "%d%%", v);
+        break;
+    case offsetof(TrackParams, hold):
+        if (v == 0) snprintf(buf, len, "NEXT");
+        else snprintf(buf, len, "%d ST", v);
         break;
     case offsetof(TrackParams, attack):
     case offsetof(TrackParams, release):

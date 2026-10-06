@@ -45,7 +45,7 @@ INCLUDES="-nostdinc -isystem $("$CC" -print-file-name=include) \
 "$CC" --sysroot="$SYSROOT" $INCLUDES -O2 -mcpu=cortex-a53 -std=gnu99 -Wall -Wextra -Wno-format-truncation \
     -include tools/glibc-compat.h -Isrc -I"$SYSROOT/usr/include/SDL2" -D_REENTRANT \
     -o "$BUILD/ardkore" \
-    src/engine.c src/sample.c src/wav.c src/machine.c src/demo.c src/params.c \
+    src/engine.c src/sample.c src/wav.c src/machine.c src/demo.c src/ps1.c src/params.c \
     src/project.c src/ui.c src/font.c src/main.c \
     -L"$LIBDIR" -Wl,-rpath-link,"$LIBDIR" -Wl,--allow-shlib-undefined -lSDL2 -lm
 aarch64-linux-gnu-strip "$BUILD/ardkore" 2>/dev/null || true
