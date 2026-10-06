@@ -23,7 +23,13 @@ cd "$GAMEDIR" || exit 1
 > "$GAMEDIR/log.txt" && exec > >(tee "$GAMEDIR/log.txt") 2>&1
 
 mkdir -p "$GAMEDIR/samples"
+$ESUDO chmod +x "$GAMEDIR/ardkore"
 export SDL_GAMECONTROLLERCONFIG="$sdl_controllerconfig"
+
+# Uncomment if A/B and X/Y feel swapped:
+# export ARDKORE_SWAP_AB=1
+# Raise (e.g. to 2048) if the audio crackles; lower for snappier response:
+export ARDKORE_AUDIO_FRAMES=1024
 
 ./ardkore --fullscreen --samples "$GAMEDIR/samples" --project "$GAMEDIR/ardkore.prj"
 

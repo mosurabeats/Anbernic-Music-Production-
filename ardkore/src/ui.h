@@ -60,11 +60,14 @@ typedef struct {
 
     char status[64];
     int status_ms;
+    char info[3][56]; /* device diagnostics shown on the PRJ page, filled by the platform layer */
     int quit;
 
     WaveCache wave[NUM_TRACKS];
     uint32_t fb[SCREEN_W * SCREEN_H];
 } Ui;
+
+extern const char *const ui_button_names[BTN_COUNT];
 
 void ui_init(Ui *ui, Engine *eng, const char *samples_dir, const char *project_path);
 void ui_set_lock(Ui *ui, void (*lock)(void *), void (*unlock)(void *), void *ctx);

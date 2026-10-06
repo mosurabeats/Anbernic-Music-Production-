@@ -67,17 +67,22 @@ Handy for development without a screen:
 ./ardkore --screenshot shot.ppm --page 1   # dump a page as an image
 ```
 
-For the handheld, cross-compile for aarch64 against the device's SDL2:
+For the handheld (aarch64, any PortMaster firmware):
 
 ```sh
-make CC=aarch64-linux-gnu-gcc PKG_CONFIG=aarch64-linux-gnu-pkg-config
+./tools/build-handheld.sh   # -> build/ARDKORE-handheld.zip
 ```
 
-Build against an older glibc (e.g. Debian Bullseye) so the binary runs on
-the custom firmwares.
+The script downloads a minimal Debian Bullseye arm64 sysroot (glibc, SDL2
+2.0.14), cross-compiles against it with `aarch64-linux-gnu-gcc`, checks the
+binary needs nothing newer than the glibc 2.17 baseline, and packages the zip.
 
-## Installing (PortMaster)
+## Installing (muOS / PortMaster)
 
-1. Copy `port/ARDKORE.sh` into your ports folder.
-2. Make an `ardkore/` folder next to it with the `ardkore` binary and a `samples/` folder.
-3. Drop WAVs into `ardkore/samples/` and launch ARDKORE from Ports.
+1. Copy `ARDKORE.sh` from the zip to `ROMS/Ports/` on the SD card.
+2. Copy the `ardkore/` folder from the zip to `ports/ardkore/`.
+3. Drop WAVs into `ports/ardkore/samples/` and launch ARDKORE from Ports.
+
+Every launch writes `ports/ardkore/log.txt`. The PRJ page shows the last
+button SDL saw, the pad name and the audio/video drivers. Holding any three
+buttons for 2 seconds force-quits. See `port/INSTALL.txt` for troubleshooting.

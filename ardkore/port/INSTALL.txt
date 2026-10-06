@@ -1,0 +1,27 @@
+ARDKORE - first device test build (muOS / PortMaster)
+=====================================================
+
+INSTALL (muOS)
+1. Power off and put the SD card in your computer.
+2. Copy ARDKORE.sh        ->  ROMS/Ports/ARDKORE.sh
+3. Copy the ardkore folder ->  ports/ardkore/
+   (both at the root of the SD card that muOS uses for ROMS; on a
+   one-card setup that's the main card)
+4. Optional: put some .wav files in ports/ardkore/samples/
+5. Boot, open Explore Content -> Ports -> ARDKORE.
+
+FIRST TEST
+- It should start on the SEQ page with a demo break. Press START: you
+  should hear the break with a pad on top.
+- L1/R1 switch pages. On the PRJ page (last page) the bottom three lines
+  show which button SDL saw last, the pad name and the audio/video drivers.
+- SELECT+START saves and quits back to muOS.
+- If the buttons don't respond or quitting doesn't work: hold any three
+  buttons for 2 seconds to force quit.
+
+IF SOMETHING GOES WRONG
+Send back ports/ardkore/log.txt (written every launch), plus a photo of
+the PRJ page if it starts. Things worth noting:
+- A/B (or X/Y) swapped: set ARDKORE_SWAP_AB=1 in ARDKORE.sh (see comment)
+- crackly audio: raise ARDKORE_AUDIO_FRAMES in ARDKORE.sh to 2048
+- pad shows as RAW and buttons are wrong: see controls.txt.example

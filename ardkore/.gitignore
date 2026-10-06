@@ -3,3 +3,4 @@
 *.prj
 *.prj.tmp
 *.o
+/build/

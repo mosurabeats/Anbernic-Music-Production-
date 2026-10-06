@@ -28,6 +28,11 @@
 #define REPEAT_DELAY 280
 #define REPEAT_RATE 55
 
+const char *const ui_button_names[BTN_COUNT] = {
+    "UP", "DOWN", "LEFT", "RIGHT", "A", "B", "X", "Y",
+    "L1", "R1", "L2", "R2", "START", "SELECT", "MENU",
+};
+
 static const char *const page_names[PAGE_COUNT] = {"SEQ", "SMP", "FIL", "PRJ"};
 
 enum { PRJ_BPM, PRJ_SWING, PRJ_MASTER, PRJ_SAVE, PRJ_RELOAD, PRJ_NEW, PRJ_CLEAR, PRJ_COUNT };
@@ -689,7 +694,8 @@ static void draw_project(Ui *ui)
         "X/Y       PREV/NEXT SLICE (SMP PAGE)",
         "Y+DPAD    STEP VELOCITY (SEQ PAGE)",
     };
-    for (int i = 0; i < 6; i++) text(ui, 4, 120 + i * 11, help[i], COL_DIM);
+    for (int i = 0; i < 6; i++) text(ui, 4, 114 + i * 10, help[i], COL_DIM);
+    for (int i = 0; i < 3; i++) text(ui, 4, 182 + i * 10, ui->info[i], COL_INK);
 }
 
 static const char *page_hint(int page)

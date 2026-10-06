@@ -1,0 +1,17 @@
+# Only needed if ARDKORE's PRJ page shows "RAW" for the pad and buttons
+# do the wrong thing. Rename this file to controls.txt (next to the
+# ardkore binary) and set each action to the number shown as "JOY n" on
+# the PRJ page's INPUT line when you press that button.
+#
+# The D-pad is read from the joystick's hat or first two axes automatically.
+a=1
+b=0
+x=2
+y=3
+l1=4
+r1=5
+l2=6
+r2=7
+select=8
+start=9
+menu=10
