@@ -184,7 +184,46 @@ static void enter_dir(Ui *ui, const char *name)
     }
     ui->file_cur = 0;
     ui->file_top = 0;
+    ui->preview_info[0] = 0;
+    ui->preview_wait_ms = 0;
     scan_dir(ui);
+}
+
+#define PREVIEW_DELAY_MS 180
+
+static int entry_path(const Ui *ui, const FileEntry *fe, char *out, size_t len)
+{
+    if (strlen(ui->browse_dir) + strlen(fe->name) + 2 > len) return -1;
+    snprintf(out, len, "%s/%s", strcmp(ui->browse_dir, "/") ? ui->browse_dir : "", fe->name);
+    return 0;
+}
+
+static void preview_entry(Ui *ui)
+{
+    ui->preview_wait_ms = 0;
+    if (ui->file_cur < 0 || ui->file_cur >= ui->nfiles) return;
+    const FileEntry *fe = &ui->files[ui->file_cur];
+    char path[SRC_ID_LEN], name[SAMPLE_NAME_LEN], err[64];
+    float *mono;
+    int len, rate, loop;
+    if (fe->kind != 0 || entry_path(ui, fe, path, sizeof path) != 0) return;
+    if (demo_load_source(path, &mono, &len, &rate, &loop, name, sizeof name, err, sizeof err) != 0) {
+        snprintf(ui->preview_info, sizeof ui->preview_info, "%s", err);
+        return;
+    }
+    snprintf(ui->preview_info, sizeof ui->preview_info, "%dHZ  %.2fS%s", rate, (double)len / rate,
+             loop >= 0 ? "  LOOPED" : "");
+    lock(ui);
+    engine_preview(ui->eng, mono, len, rate);
+    unlock(ui);
+}
+
+static void stop_preview(Ui *ui)
+{
+    ui->preview_wait_ms = 0;
+    lock(ui);
+    engine_preview(ui->eng, NULL, 0, 0);
+    unlock(ui);
 }
 
 static void load_entry(Ui *ui)
@@ -196,10 +235,11 @@ static void load_entry(Ui *ui)
     }
     char id[SRC_ID_LEN];
     if (fe->kind == 3) snprintf(id, sizeof id, "%s", fe->name);
-    else if (strlen(ui->browse_dir) + strlen(fe->name) + 2 > sizeof id) {
+    else if (entry_path(ui, fe, id, sizeof id) != 0) {
         ui_status(ui, "PATH TOO LONG");
         return;
-    } else snprintf(id, sizeof id, "%s/%s", strcmp(ui->browse_dir, "/") ? ui->browse_dir : "", fe->name);
+    }
+    stop_preview(ui);
 
     float *mono;
     int len, rate, loop;
@@ -334,10 +374,16 @@ static void handle_dir(Ui *ui, int b)
             if (idx < param_count) ui->prm = idx;
         }
         break;
-    case PAGE_FILES:
+    case PAGE_FILES: {
+        int before = ui->file_cur;
         if (dy) ui->file_cur = clampi(ui->file_cur + dy, 0, ui->nfiles - 1);
         if (dx) ui->file_cur = clampi(ui->file_cur + dx * 10, 0, ui->nfiles - 1);
+        if (ui->file_cur != before) {
+            ui->preview_info[0] = 0;
+            if (ui->auto_preview) ui->preview_wait_ms = PREVIEW_DELAY_MS;
+        }
         break;
+    }
     case PAGE_PROJECT:
         if (ui->held[BTN_A]) {
             ui->a_edited = 1;
@@ -423,7 +469,9 @@ void ui_button(Ui *ui, int b, int down)
         }
         break;
     case BTN_X:
-        if (ui->page == PAGE_SEQ) {
+        if (ui->page == PAGE_FILES) {
+            preview_entry(ui);
+        } else if (ui->page == PAGE_SEQ) {
             Step *st = &t->steps[ui->seq_step];
             if (st->on) st->roll = (uint8_t)((st->roll + 1) % ROLL_COUNT);
         } else if (ui->page == PAGE_SAMPLE) {
@@ -432,7 +480,10 @@ void ui_button(Ui *ui, int b, int down)
         }
         break;
     case BTN_Y:
-        if (ui->page == PAGE_SAMPLE) {
+        if (ui->page == PAGE_FILES) {
+            ui->auto_preview = !ui->auto_preview;
+            ui_status(ui, ui->auto_preview ? "AUTO PREVIEW ON" : "AUTO PREVIEW OFF");
+        } else if (ui->page == PAGE_SAMPLE) {
             ui->sel_slice[ui->track] = (ui->sel_slice[ui->track] + 1) % nsl;
             audition(ui, ui->sel_slice[ui->track]);
         }
@@ -471,6 +522,10 @@ void ui_tick(Ui *ui, int dt_ms)
             ui->repeat_ms[b] -= REPEAT_RATE;
             handle_dir(ui, b);
         }
+    }
+    if (ui->preview_wait_ms > 0 && (ui->preview_wait_ms -= dt_ms) <= 0) {
+        if (ui->page == PAGE_FILES) preview_entry(ui);
+        ui->preview_wait_ms = 0;
     }
     if (ui->status_ms > 0) ui->status_ms -= dt_ms;
     if (ui->confirm_ms > 0 && (ui->confirm_ms -= dt_ms) <= 0) ui->confirm_item = -1;
@@ -649,7 +704,7 @@ static void draw_files(Ui *ui)
     size_t n = strlen(ui->browse_dir);
     snprintf(dir, sizeof dir, "%s", n > 50 ? ui->browse_dir + n - 50 : ui->browse_dir);
     textf(ui, 4, 22, COL_DIM, "%s", dir);
-    int rows = 21, y0 = 34;
+    int rows = 20, y0 = 34;
     if (ui->file_cur < ui->file_top) ui->file_top = ui->file_cur;
     if (ui->file_cur >= ui->file_top + rows) ui->file_top = ui->file_cur - rows + 1;
     for (int i = 0; i < rows && ui->file_top + i < ui->nfiles; i++) {
@@ -676,6 +731,7 @@ static void draw_files(Ui *ui)
         default: text(ui, 4, y, name, fg); break;
         }
     }
+    if (ui->preview_info[0]) text(ui, 4, 218, ui->preview_info, COL_DIM);
     if (ui->nfiles <= BUILTIN_COUNT + 1)
         text(ui, 4, y0 + (BUILTIN_COUNT + 2) * 9, "(PUT .WAV/.VAG FILES IN THE SAMPLES FOLDER)", COL_DIM);
 }
@@ -719,7 +775,7 @@ static const char *page_hint(int page)
     switch (page) {
     case PAGE_SEQ: return "A:STEP  A+PAD:VAL  X:ROLL  B:HEAR  START:PLAY";
     case PAGE_SAMPLE: return "A+PAD:EDIT  X/Y:SLICE  B:HEAR  START:PLAY";
-    case PAGE_FILES: return "A:LOAD TO TRACK  B:UP  L2/R2:TRACK";
+    case PAGE_FILES: return "A:LOAD  X:HEAR  Y:AUTO  B:UP  L2/R2:TRACK";
     default: return "A:SELECT  A+PAD:EDIT  L1/R1:PAGE";
     }
 }
@@ -773,6 +829,7 @@ void ui_init(Ui *ui, Engine *eng, const char *samples_dir, const char *project_p
     memset(ui, 0, sizeof(*ui));
     ui->eng = eng;
     ui->confirm_item = -1;
+    ui->auto_preview = 1;
     for (int t = 0; t < NUM_TRACKS; t++) ui->last_note[t] = SAMPLE_NOTE_CENTER;
     char resolved[PATH_MAX];
     snprintf(ui->browse_dir, sizeof ui->browse_dir, "%s", realpath(samples_dir, resolved) ? resolved : samples_dir);

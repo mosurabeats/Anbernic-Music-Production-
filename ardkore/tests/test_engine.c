@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "demo.h"
@@ -497,6 +498,40 @@ static void test_pads(void)
     engine_free(&eng);
 }
 
+static void test_preview(void)
+{
+    const char *dir = "/tmp/ardkore_pv";
+    mkdir(dir, 0755);
+    float lr[2 * 2205];
+    for (int i = 0; i < 2205; i++) lr[2 * i] = lr[2 * i + 1] = (float)sin(i * 0.2) * 0.5f;
+    wav_save_stereo16("/tmp/ardkore_pv/a.wav", lr, 2205, 11025);
+
+    engine_init(&eng, 44100);
+    ui_init(&ui, &eng, dir, "/tmp/ardkore_pv/p.prj");
+    ui.page = PAGE_FILES;
+    int idx = -1;
+    for (int i = 0; i < ui.nfiles; i++)
+        if (!strcmp(ui.files[i].name, "a.wav")) idx = i;
+    CHECK(idx > 0, "test wav listed");
+    ui.file_cur = idx - 1;
+    press(BTN_DOWN);
+    CHECK(eng.pv_data == NULL && ui.preview_wait_ms > 0, "preview waits for the cursor to rest");
+    ui_tick(&ui, 200);
+    CHECK(eng.pv_data && eng.pv_len == 2205 && !strncmp(ui.preview_info, "11025HZ", 7), "preview loaded: %s",
+          ui.preview_info);
+    float buf[2 * 512];
+    engine_render(&eng, buf, 512);
+    CHECK(fabsf(buf[2 * 100]) > 0.01f || fabsf(buf[2 * 200]) > 0.01f, "preview is audible");
+    press(BTN_Y);
+    CHECK(!ui.auto_preview, "Y turns auto preview off");
+    press(BTN_UP);
+    CHECK(ui.preview_wait_ms == 0, "no preview scheduled when off");
+    press(BTN_A); /* load whatever is under the cursor stops the preview */
+    engine_free(&eng);
+    unlink("/tmp/ardkore_pv/a.wav");
+    rmdir(dir);
+}
+
 int main(void)
 {
     test_protracker_rates();
@@ -512,6 +547,7 @@ int main(void)
     test_ps1_pitch_and_gauss();
     test_ps1_reverb();
     test_pads();
+    test_preview();
     printf("%d/%d checks passed\n", checks - failures, checks);
     return failures ? 1 : 0;
 }

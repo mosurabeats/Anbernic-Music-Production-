@@ -50,6 +50,8 @@ typedef struct {
 
     FileEntry files[UI_MAX_FILES];
     int nfiles, file_cur, file_top;
+    int auto_preview, preview_wait_ms; /* preview the file under the cursor once it rests */
+    char preview_info[40];
 
     int proj_cur;
     int confirm_item, confirm_ms;

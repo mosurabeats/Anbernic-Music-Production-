@@ -70,6 +70,16 @@ void engine_init(Engine *e, int sr)
 void engine_free(Engine *e)
 {
     for (int t = 0; t < NUM_TRACKS; t++) sample_free(&e->tr[t].smp);
+    engine_preview(e, NULL, 0, 0);
+}
+
+void engine_preview(Engine *e, float *mono, int len, int rate)
+{
+    free(e->pv_data);
+    e->pv_data = mono;
+    e->pv_len = mono ? len : 0;
+    e->pv_pos = 0.0;
+    e->pv_inc = mono ? (double)rate / e->sr : 0.0;
 }
 
 static void stop_voices(Track *t)
@@ -477,6 +487,16 @@ void engine_render(Engine *e, float *lr, int frames)
             r += xr;
             sl += xl * send[ti];
             sr += xr * send[ti];
+        }
+        if (e->pv_data) {
+            int i = (int)e->pv_pos;
+            if (i + 1 < e->pv_len) {
+                float frac = (float)(e->pv_pos - i);
+                float x = (e->pv_data[i] + (e->pv_data[i + 1] - e->pv_data[i]) * frac) * 0.7f;
+                l += x;
+                r += x;
+                e->pv_pos += e->pv_inc;
+            }
         }
         float wl, wr;
         ps1_reverb_run(&e->rvb, sl, sr, &wl, &wr);

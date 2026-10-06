@@ -98,6 +98,10 @@ typedef struct {
     Track tr[NUM_TRACKS];
     Ps1Reverb rvb;
     int rvb_applied; /* preset the reverb was initialised with */
+    /* File-browser preview: raw source audio played once at its own rate. */
+    float *pv_data;
+    int pv_len;
+    double pv_pos, pv_inc;
     float peak;
 } Engine;
 
@@ -114,6 +118,10 @@ void engine_track_rebake(Engine *e, int track);
 void engine_track_reslice(Engine *e, int track);
 
 void engine_trigger(Engine *e, int track, int val, int vel);
+
+/* Play `mono` once for auditioning (takes ownership; replaces any preview).
+ * Pass NULL to stop. Call with the audio locked. */
+void engine_preview(Engine *e, float *mono, int len, int rate);
 void engine_play(Engine *e, int on);
 
 /* Render interleaved stereo float. */

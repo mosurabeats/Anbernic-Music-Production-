@@ -52,6 +52,7 @@ sampler voicings, and sequence them with a gamepad.
 | A | toggle step / cycle option / load file / run action |
 | A + D-pad | edit value (left/right fine, up/down coarse) |
 | B | audition (FIL page: up one folder) |
+| FIL page | resting on a file previews it; X previews, Y toggles auto-preview |
 | X | SEQ: cycle the step's roll · SMP: previous slice |
 | Y | SMP: next slice · SEQ: hold + D-pad for velocity |
 | START | play / stop |
